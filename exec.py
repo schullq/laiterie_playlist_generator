@@ -1,5 +1,6 @@
 from cgitb import html
-import argparse, inspect, json, sys, time, requests, re, spotipy, configparser
+import argparse, inspect, json, time, requests, re, spotipy, configparser, logging, sys
+from fileinput import filename
 from glob import glob
 from pydoc import doc
 from bs4 import BeautifulSoup
@@ -8,8 +9,7 @@ from datetime import datetime
 from spotipy.oauth2 import SpotifyOAuth
 
 class LaiterieScrapper:
-    def __init__(self):
-        self.laiterie_url = 'https://www.artefact.org/la-laiterie/programmation'
+    laiterie_url = 'https://www.artefact.org/la-laiterie/programmation'
     
     def scrap_url(self, pager):
         html_text = handle_http_request('GET', self.laiterie_url + '?p=' + str(pager)).text
@@ -20,7 +20,7 @@ class LaiterieScrapper:
         return True
 
     def get_artists(self):
-        print("Scrapping artists...")    
+        logging.info("Scrapping artists...")    
         pager = 1
         artists = []
         while (self.scrap_url(pager)):
@@ -38,15 +38,9 @@ class Spotify:
     playlist_url = base_url + 'playlists/0djk4ksDSzklafJj2z1D4F/tracks'
     scopes = 'playlist-modify-public playlist-modify-private'
 
-    def __init__(self):
-        config = configparser.ConfigParser()
-        try:
-            with open('./.conf') as f:
-                config.read_file(f)
-        except IOError:
-            raise Exception('.conf file doesn \'t exist')
-        self.client_id = config['spotify']['client_id']
-        self.client_secret = config['spotify']['client_secret']
+    def __init__(self, client_id, client_secret):
+        self.client_id = client_id
+        self.client_secret = client_secret
         self.authenticate()
 
     def authenticate(self):
@@ -55,7 +49,6 @@ class Spotify:
         token_info = sp_oauth.get_cached_token()
         if not token_info:
             auth_url = sp_oauth.get_authorize_url()
-            print(auth_url)
             response = input('Paste the above link into your browser, then paste the redirect url here: ')
             code = sp_oauth.parse_response_code(response)
             token_info = sp_oauth.get_access_token(code)
@@ -67,7 +60,7 @@ class Spotify:
         sp = spotipy.Spotify(auth=self.token)
 
     def refresh_token(self):
-        print("Refreshing token...")
+        logging.info("Refreshing token...")
         sp_oauth = SpotifyOAuth(client_id=self.client_id,client_secret=self.client_secret,redirect_uri='http://example.com',scope=self.scopes)
         token_info = sp_oauth.get_cached_token()
         if SpotifyOAuth.is_token_expired(token_info):
@@ -79,12 +72,11 @@ class Spotify:
             }
 
     def search_artist(self, name):
-        print(f'Searching for {name}...')
+        logging.info(f'Searching for {name}...')
         url = self.base_url + f'search?q={name}&type=artist&include_external=audio'
-        print(self.headers)
         response = handle_http_request('GET', url, headers=self.headers)
         if int(response.json().get('artists').get('total')) == 0:
-            print(f'No results for {name}')
+            logging.info(f'No results for {name}')
             return            
         best_match = ('', 0)
         for artist in response.json().get('artists').get('items'):
@@ -100,7 +92,7 @@ class Spotify:
                     break
             if f_best_match == best_match:
                 if f_best_match == best_match:
-                    print(f'No fine match for {name}')
+                    logging.info(f'No fine match for {name}')
                     return []
         return best_match[0].get('href')
 
@@ -138,7 +130,7 @@ class Spotify:
         return [x.get('track').get('uri') for x in current_tracks]
 
     def add_track_to_playlist(self, track_uris, force=False):
-        print("Adding tracks to playlist...")    
+        logging.info("Adding tracks to playlist...")    
         if not force:
             current_track_uris = self.get_current_tracks()
             for current_track_uri in current_track_uris:
@@ -151,7 +143,7 @@ class Spotify:
             handle_http_request('POST', self.playlist_url, data=data, headers=self.headers)
     
     def clear_past_shows(self, track_uris):
-        print("Clearing past shows...")    
+        logging.info("Clearing past shows...")    
         current_track_uris = self.get_current_tracks()
         uris_to_delete = []
         for current_track_uri in current_track_uris:
@@ -168,7 +160,7 @@ count_call = 0
 def handle_http_request(type, url, headers={}, data={}):
     global count_call
     if count_call != 0 and count_call % 50 == 0:
-        print(f'Pausing script 10 sec to avoid 429 (total count: {count_call})...')
+        logging.info(f'Pausing script 10 sec to avoid 429 (total count: {count_call})...')
         time.sleep(10)
     if type == 'GET':
         response = requests.get(url, headers=headers)
@@ -181,40 +173,52 @@ def handle_http_request(type, url, headers={}, data={}):
     count_call += 1
     if not response.ok:
         frm = inspect.stack()[1]
-        print(f'HttpError: "({response.status_code}) {response.reason}"  at line {frm[2]} <{frm[3]}>')
+        logging.error(f'HttpError: "({response.status_code}) {response.reason}"  at line {frm[2]} <{frm[3]}>')
         exit()
     return response
 
 def main():
-    spotify = Spotify()
+    config = configparser.ConfigParser()
+    try:
+        with open('./.conf') as f:
+            config.read_file(f)
+    except IOError:
+        raise Exception('.conf file doesn \'t exist')
+
+    log_level = config['logging']['level']
+    logging.basicConfig(level=getattr(logging, log_level), filename='.log', filemode='w', format='%(asctime)s - %(levelname)s: %(message)s')
+
+    spotify = Spotify(config['spotify']['client_id'], config['spotify']['client_secret'])
     parser = argparse.ArgumentParser()
     parser.add_argument("-r", "--refresh-token", help = "Refresh spotify access token.", action="store_true")
     args = parser.parse_args()
 
+    logging.info(f"New script exec with arg {sys.argv[1:]}")
+
     if args.refresh_token:
         spotify.refresh_token()
-    
-    ls = LaiterieScrapper()
-    artists = ls.get_artists()
-    tracks = []
-    for artist in artists:
-        artist_url = spotify.search_artist(artist)
-        if artist_url:
-            top_tracks = spotify.get_artist_top_tracks(artist_url)
-            last_release_top_tracks = []
-            offset = 0
-            while not last_release_top_tracks:
-                found_tracks = spotify.get_last_release_top_tracks(artist_url, offset)
-                if not found_tracks:
-                    break
-                if not any(check in found_tracks for check in top_tracks):
-                    last_release_top_tracks = found_tracks
-                else:
-                    offset += 1
-            tracks.extend(top_tracks)
-            tracks.extend(last_release_top_tracks)
-    spotify.clear_past_shows(tracks)
-    spotify.add_track_to_playlist(tracks)
+    else:
+        ls = LaiterieScrapper()
+        artists = ls.get_artists()
+        tracks = []
+        for artist in artists:
+            artist_url = spotify.search_artist(artist)
+            if artist_url:
+                top_tracks = spotify.get_artist_top_tracks(artist_url)
+                last_release_top_tracks = []
+                offset = 0
+                while not last_release_top_tracks:
+                    found_tracks = spotify.get_last_release_top_tracks(artist_url, offset)
+                    if not found_tracks:
+                        break
+                    if not any(check in found_tracks for check in top_tracks):
+                        last_release_top_tracks = found_tracks
+                    else:
+                        offset += 1
+                tracks.extend(top_tracks)
+                tracks.extend(last_release_top_tracks)
+        spotify.clear_past_shows(tracks)
+        spotify.add_track_to_playlist(tracks)
 
 if __name__=="__main__":
     main()
